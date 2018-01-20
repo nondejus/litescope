@@ -1,5 +1,5 @@
 from litex.gen import *
-from litex.gen.genlib.cdc import MultiReg
+from litex.gen.genlib.cdc import MultiReg, PulseSynchronizer
 
 from litex.build.tools import write_to_file
 
@@ -27,25 +27,49 @@ def core_layout(dw, hw=1):
 
 
 class FrontendTrigger(Module, AutoCSR):
-    def __init__(self, dw):
+    def __init__(self, dw, depth=16):
         self.sink = stream.Endpoint(core_layout(dw))
         self.source = stream.Endpoint(core_layout(dw))
 
-        self.value = CSRStorage(dw)
-        self.mask = CSRStorage(dw)
+        self.mem_flush = CSR()
+        self.mem_write = CSR()
+        self.mem_mask = CSRStorage(dw)
+        self.mem_value = CSRStorage(dw)
 
         # # #
 
-        value = Signal(dw)
-        mask = Signal(dw)
-        self.specials += [
-            MultiReg(self.value.storage, value),
-            MultiReg(self.mask.storage, mask)
+        # memory and configuration
+        mem = stream.AsyncFIFO([("mask", dw), ("value", dw)], depth)
+        mem = ClockDomainsRenamer({"write": "csr_sys", "read": "sys"})(mem)
+        self.submodules += mem
+        self.comb += [
+            mem.sink.valid.eq(self.mem_write.re),
+            mem.sink.mask.eq(self.mem_mask.storage),
+            mem.sink.value.eq(self.mem_value.storage)
         ]
 
+        # hit and memory read/flush
+        hit = Signal()
+        flush = PulseSynchronizer("csr_sys", "sys")
+        flush_count = Signal(max=depth)
+        self.submodules += flush
+        self.comb += flush.i.eq(self.mem_flush.re)
+        self.sync += [
+            If(flush.o,
+                flush_count.eq(depth - 1)
+            ).Else(
+                flush_count.eq(flush_count - 1)
+            )
+        ]
+        self.comb += [
+            mem.source.ready.eq(hit | (flush_count != 0)),
+            hit.eq((self.sink.data & mem.source.mask) == mem.source.value)
+        ]
+
+        # output
         self.comb += [
             self.sink.connect(self.source),
-            self.source.hit.eq((self.sink.data & mask) == value)
+            self.source.hit.eq(~mem.source.valid)
         ]
 
 
@@ -108,7 +132,7 @@ class AnalyzerFrontend(Module, AutoCSR):
         self.submodules.converter = stream.StrideConverter(
                 core_layout(dw, 1), core_layout(dw*cd_ratio, cd_ratio))
         self.submodules.fifo = ClockDomainsRenamer(
-            {"write": "sys", "read": "new_sys"})(
+            {"write": "sys", "read": "csr_sys"})(
                 stream.AsyncFIFO(core_layout(dw*cd_ratio, cd_ratio), 8))
         self.submodules.pipeline = stream.Pipeline(
             self.sink,
@@ -211,7 +235,7 @@ class LiteScopeAnalyzer(Module, AutoCSR):
                 self.mux.sinks[i].data.eq(Cat(signals))
             ]
         self.submodules.frontend = ClockDomainsRenamer(
-            {"sys": cd, "new_sys": "sys"})(AnalyzerFrontend(self.dw, cd_ratio))
+            {"sys": cd, "csr_sys": "sys"})(AnalyzerFrontend(self.dw, cd_ratio))
         self.submodules.storage = AnalyzerStorage(self.dw*cd_ratio, depth, cd_ratio)
         self.comb += [
             self.mux.source.connect(self.frontend.sink),

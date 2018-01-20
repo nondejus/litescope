@@ -61,14 +61,14 @@ class LiteScopeAnalyzerDriver:
         self.mux_value.write(value)
 
     def configure_trigger(self, value=0, mask=0, cond=None):
+        self.frontend_trigger_mem_flush.write(1)
         if cond is not None:
             for k, v in cond.items():
                 value |= getattr(self, k + "_o")*v
                 mask |= getattr(self, k + "_m")
-        t = getattr(self, "frontend_trigger_value")
-        m = getattr(self, "frontend_trigger_mask")
-        t.write(value)
-        m.write(mask)
+        self.frontend_trigger_mem_mask.write(mask)
+        self.frontend_trigger_mem_value.write(value)
+        self.frontend_trigger_mem_write.write(1)
 
     def configure_subsampler(self, value):
         self.frontend_subsampler_value.write(value-1)
